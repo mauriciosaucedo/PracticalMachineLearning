@@ -1,0 +1,200 @@
+---
+title: "Practical Machine Learning Course Project. Prediction Assignment"
+author: "Mauricio Saucedo"
+date: "March 2, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Background
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement - a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: http://groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset).
+
+The main goal for this project is to model and predict how the participants did the exercise. The classe variable in our data set helps describe this by ranking from A to E. This report describes how the model was built, its crossvalidation, expected out of sample error and the choices made.
+
+##Data
+
+The training data for this project are available here:
+<https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv>
+
+The test data are available here:
+<https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv>
+
+The data for this project come from this source: <http://groupware.les.inf.puc-rio.br/har>
+
+As first step we download the data to our local computer and load into R, we also clean up a bit by interpreting "#DIV/0!" and blanks as NAs
+
+```{r data1}
+setwd("~/Training/R/machine")
+training <- read.csv("pml-training.csv", na.strings = c("NA", "#DIV/0!", ""))
+testing  <- read.csv("pml-testing.csv",  na.strings = c("NA", "#DIV/0!", ""))
+```
+
+We take a look at the structure of our data set:
+
+```{r data2}
+str(training, list.len=15)
+```
+
+We take a look at how the classe is distributed within our data:
+
+```{r data3}
+table(training$classe)
+```
+
+By looking at the data structure we can conclude that the first six columns are only descriptive data so we get rid of them:
+
+```{r data4}
+training <- training[, 7:160]
+testing  <- testing[, 7:160]
+```
+
+```{r data5}
+is_data  <- apply(!is.na(training), 2, sum) > 19621  # number of observations
+training <- training[, is_data]
+testing  <- testing[, is_data]
+```
+
+Next, we divide our training data set in 2 for cross validation purposes (60% training and 40% testing)
+
+```{r data6}
+library(caret)
+set.seed(1597)
+inTrain <- createDataPartition(y=training$classe, p=0.60, list=FALSE)
+train1  <- training[inTrain,]
+train2  <- training[-inTrain,]
+dim(train1)
+dim(train2)
+```
+
+train1 is the training data set (it contains 11776 observations), and train2 is the testing data set (it contains 7846 observations). The dataset train2 will be used only for accuracy measurements.
+
+We now identify the "zero covariates" from train1 and remove them from both train1 and train2:
+
+```{r data7}
+nzv_cols <- nearZeroVar(train1)
+if(length(nzv_cols) > 0) {
+  train1 <- train1[, -nzv_cols]
+  train2 <- train2[, -nzv_cols]
+}
+dim(train1)
+dim(train2)
+```
+
+As we can note, the initial removal of NAs was enough for data cleaning so this step did not remove any extra columns.
+
+##Data Preparation
+
+We have 53 covariates, we will now look at their relative importance using randomForest algorithm (this method was preferred over caret since we cannot specify the number of trees to use) Then we plot the data with varImpPlot()
+
+```{r prep1}
+library(randomForest)
+set.seed(1597)
+fitModel <- randomForest(classe~., data=train1, importance=TRUE, ntree=100)
+varImpPlot(fitModel)
+```
+
+Based on the Accuracy and Gini graphs above, we select the top 10 variables that we'll use for model building:
+- yaw_belt
+- roll_belt
+- num_window
+- pitch_belt
+- magnet_dumbbell_y
+- magnet_dumbbell_z
+- pitch_forearm
+- accel_dumbbell_y
+- roll_arm
+- roll_forearm
+
+
+Now we analyze the correlations between these 10 variables. We calculate the correlation matrix with cor function and replace the 1s in the diagonal with 0s, then output which variables have an absolute value correlation above 75%:
+
+```{r prep2}
+corr = cor(train1[,c("yaw_belt","roll_belt","num_window","pitch_belt","magnet_dumbbell_z","magnet_dumbbell_y","pitch_forearm","accel_dumbbell_y","roll_arm","roll_forearm")])
+diag(corr) <- 0
+which(abs(corr)>0.75, arr.ind=TRUE)
+```
+
+As we can see roll_belt and yaw_belt have a high correlation with each other:
+
+```{r prep3}
+cor(train1$roll_belt, train1$yaw_belt)
+```
+
+We eliminate yaw_belt from the list of 10 variables and concentrate only on the remaining 9 variables, then we will test again for correlation. 
+
+```{r prep4}
+corr = cor(train1[,c("roll_belt","num_window","pitch_belt","magnet_dumbbell_z","magnet_dumbbell_y","pitch_forearm","accel_dumbbell_y","roll_arm","roll_forearm")])
+diag(corr) <- 0
+which(abs(corr)>0.75, arr.ind=TRUE)
+```
+
+As seen by this result there are no more high correlation between our covariates.
+
+## Data Modeling
+
+Our next step is to create our model. We will use Random Forest algorithm using the train() function from the caret package.
+
+We are using 9 variables out of the 53 as model parameters. These variables were among the most significant variables generated by an initial Random Forest algorithm
+
+These variables are relatively independent as none of them surpassed the 75% correlation thresold.
+
+We are using a 2-fold cross-validation control. This is the simplest k-fold cross-validation possible and it will give a reduced computation time. Because the data set is large, using a small number of folds is justified.
+
+```{r model1}
+set.seed(1597)
+fitModel <- train(classe~roll_belt+num_window+pitch_belt+magnet_dumbbell_y+magnet_dumbbell_z+pitch_forearm+accel_dumbbell_y+roll_arm+roll_forearm,
+                  data=train1,
+                  method="rf",
+                  trControl=trainControl(method="cv",number=2),
+                  prox=TRUE,
+                  verbose=TRUE,
+                  allowParallel=TRUE)
+```
+
+We save the generated model for later use:
+
+```{r model2}
+saveRDS(fitModel, "modelRF.Rds")
+```
+
+We can allocate this model to a variable using the following command:
+
+```{r model3}
+fitModel <- readRDS("modelRF.Rds")
+```
+
+###Accuracy
+
+To see how accurate this model is we use caret's confusionMatrix() function applied to train2
+
+```{r model4}
+predictions <- predict(fitModel, newdata=train2)
+confusionMat <- confusionMatrix(predictions, train2$classe)
+confusionMat
+```
+
+99.6% accuracy gives us good validation of the hypotesis we made to eliminate most variables and work with 9.
+
+###Estimation of the out-of-sample error rate
+
+The Random Forest's out-of-sample error rate can be calculated by the following code:
+
+```{r model5}
+missClass = function(values, predicted) {
+  sum(predicted != values) / length(values)
+}
+OOS_errRate = missClass(train2$classe, predictions)
+OOS_errRate
+```
+
+The out-of-sample error rate is .33%
+
+##Conclusions
+
+In this assignment, we accurately predicted the classification of a data set using a Random Forest algorithm trained on a subset of data using less than 20% of the covariates.
+
+The accuracy obtained (accuracy = 99.6%, and out-of-sample error = 0.33%) makes us think that the manner in which the participants did the exercise was very obedient.
